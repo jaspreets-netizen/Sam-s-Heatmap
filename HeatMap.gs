@@ -285,20 +285,6 @@ function onEdit(e) {
 }
 
 
-function clearAllNotes() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  ss.getSheets().forEach(function(sheet) {
-    if (sheet.getType() !== SpreadsheetApp.SheetType.GRID) return;
-    if (isSystemSheet_(sheet)) return;
-    var lastRow = sheet.getLastRow();
-    var lastCol = sheet.getLastColumn();
-    if (lastRow < 1 || lastCol < 1) return;
-    sheet.getRange(1, 1, lastRow, lastCol).clearNote();
-  });
-  SpreadsheetApp.flush();
-}
-
-
 // ════════════════════════════════════════════════════════════
 //  COLUMN RANGE
 // ════════════════════════════════════════════════════════════
@@ -760,10 +746,9 @@ function createHeatMapSheet() {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🎨 Heat Map")
-    .addItem("Apply to Selection",       "applyToSelection")
     .addItem("Apply / Refresh Heat Map", "applyHeatMap")
+    .addItem("Apply to Selection",       "applyToSelection")
     .addSeparator()
     .addItem("Create / Refresh Heat Map Sheet", "createHeatMapSheet")
-    .addItem("Clear All Validation Notes",      "clearAllNotes")
     .addToUi();
 }
