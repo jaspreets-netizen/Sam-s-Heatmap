@@ -746,9 +746,9 @@ function createHeatMapSheet() {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🎨 Heat Map")
-    .addItem("Apply / Refresh Heat Map", "applyHeatMap")
-    .addItem("Apply to Selection",       "applyToSelection")
+    .addItem("Apply Heatmap Everywhere", "applyHeatMap")
+    .addItem("Apply to Selected Cells",  "applyToSelection")
     .addSeparator()
-    .addItem("Create / Refresh Heat Map Sheet", "createHeatMapSheet")
+    .addItem("Create Heatmap Config/Guide Sheet", "createHeatMapSheet")
     .addToUi();
 }
