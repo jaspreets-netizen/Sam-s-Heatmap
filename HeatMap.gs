@@ -1,37 +1,33 @@
 /**
  * ============================================================
- *  Sam's Weekly – Heat Map Script v21
+ *  Sam's Weekly – Heat Map Script v22
  * ============================================================
  *
- *  CHANGES IN v21 (vs v20)
+ *  CHANGES IN v22 (vs v21)
  *  ───────────────────────
- *  1. NEW — Metric definitions are now DATA-DRIVEN.
- *     There is no longer a hardcoded list of metric names inside
- *     the code. Instead a "⚙ Heat Map Config" sheet holds the
- *     table of metrics. Add / remove / rename a metric there and
- *     the heat map picks it up on the next run — no code edits.
- *     Build it from the menu: 🎨 Heat Map → Create / Refresh
- *     Config Sheet. If the sheet does not exist yet, the script
- *     falls back to the built-in defaults so it still works.
+ *  1. ONE SHEET — The Config table and the Guide are merged into
+ *     a single "⚙ Heat Map" sheet: the editable metric table sits
+ *     at the top, followed by 10 blank rows for you to add your
+ *     own metrics, and the (simplified) guide below that.
  *
- *  2. NEW — Robust, typo-tolerant matching + safe fallback.
- *     • Matching ignores case, collapses extra spaces and matches
- *       on a substring, so "System  Uptime " still matches
- *       "system uptime".
- *     • The LONGEST matching config entry wins, so short keys
- *       (e.g. "uph") can't hijack a longer label.
- *     • A "Target Heatmap" row that has a number in Col D but no
- *       matching config entry is STILL coloured (default:
- *       higher-is-better) instead of being skipped. A small typo
- *       no longer blanks the whole row — it just flags a note.
+ *  2. SAFER READING — A row only counts as a metric when its Type
+ *     cell is exactly "Target" or "Relative". Blank rows and all
+ *     the guide text underneath are ignored automatically, so you
+ *     can just keep adding rows — no need to pre-reserve hundreds.
  *
- *  RETAINED FROM v20
- *  ─────────────────
- *  • System Uptime, Ranger Uptime, BT/MI are Target metrics.
- *  • Relative Heatmap is GREEN-ONLY (shade = size of the
- *    week-over-week change; direction does not change colour).
- *  • Non-destructive colouring, batched writes, onEdit single-row
- *    processing, Apply to Selection, validation notes.
+ *  3. WORDING — The Direction column now reads "Higher is better"
+ *     / "Lower is better". Default metric names are shown in their
+ *     natural casing (PPF, OWT, R2R, UPH, BT/MI, …). Matching is
+ *     still case-insensitive, space-tolerant and partial.
+ *
+ *  RETAINED
+ *  ────────
+ *  • Metrics are data-driven (defaults used only if the sheet is
+ *    missing). Typo-tolerant, longest-match-wins lookup. Safe
+ *    fallback colouring for unrecognised Target rows.
+ *  • System Uptime / Ranger Uptime / BT/MI are Target metrics.
+ *  • Relative Heatmap is GREEN-ONLY (shade = size of week-over-
+ *    week change). Non-destructive, batched writes, onEdit.
  * ============================================================
  */
 
@@ -49,49 +45,49 @@ var LABEL_COL_MAX = 4; // Col D — labels live in B/C/D, NEVER in the data regi
 var FLAG_TARGET   = "target heatmap";
 var FLAG_RELATIVE = "relative heatmap";
 
-var GUIDE_SHEET_NAME  = "⚙ Heat Map Guide";
-var CONFIG_SHEET_NAME = "⚙ Heat Map Config";   // editable metric table
-var CONFIG_DATA_ROW   = 3;                     // first metric row on the Config sheet
+var SETUP_SHEET_NAME = "⚙ Heat Map";          // the one combined Config + Guide sheet
+var LEGACY_SHEETS    = ["⚙ Heat Map Guide", "⚙ Heat Map Config"];  // skipped if they still exist
+var CONFIG_DATA_ROW  = 3;                      // first metric row on the setup sheet
+var BLANK_ROWS       = 10;                     // empty metric rows for you to fill in
 
 
 // ── Built-in DEFAULT metric tables ───────────────────────────
-// These are ONLY used when the "⚙ Heat Map Config" sheet does not
-// exist yet. Once that sheet is created you edit it, not this code.
+// These are ONLY used when the "⚙ Heat Map" sheet does not exist
+// yet. Once it is created you edit the sheet, not this code.
 //
-// Target metrics — direction: "higher" = a higher value is better
-//                             "lower"  = a lower value is better
-//   yellowPct = fraction past target still counted as "yellow"
+// direction: "higher" = a higher value is better
+//            "lower"  = a lower value is better
+// yellowPct  = fraction past the target still counted as "yellow"
 var DEFAULT_TARGET_METRICS = [
-  { name: "ppf",           direction: "higher", yellowPct: 0.20, decimals: 2 },
-  { name: "uph",           direction: "higher", yellowPct: 0.10, decimals: 0 },
-  { name: "owt",           direction: "lower",  yellowPct: 0.20, decimals: 1 },
-  { name: "r2r",           direction: "lower",  yellowPct: 0.20, decimals: 1 },
-  { name: "system uptime", direction: "higher", yellowPct: 0.02, decimals: 2 },
-  { name: "ranger uptime", direction: "higher", yellowPct: 0.02, decimals: 2 },
-  { name: "bt/mi",         direction: "higher", yellowPct: 0.20, decimals: 2 }
+  { name: "PPF",           direction: "higher", yellowPct: 0.20, decimals: 2 },
+  { name: "UPH",           direction: "higher", yellowPct: 0.10, decimals: 0 },
+  { name: "OWT",           direction: "lower",  yellowPct: 0.20, decimals: 1 },
+  { name: "R2R",           direction: "lower",  yellowPct: 0.20, decimals: 1 },
+  { name: "System Uptime", direction: "higher", yellowPct: 0.02, decimals: 2 },
+  { name: "Ranger Uptime", direction: "higher", yellowPct: 0.02, decimals: 2 },
+  { name: "BT/MI",         direction: "higher", yellowPct: 0.20, decimals: 2 }
 ];
 
-// Relative metrics — "group" selects the change-size threshold set.
+// "group" selects the change-size threshold set (see GROUP_THRESHOLDS).
 var DEFAULT_RELATIVE_METRICS = [
-  { name: "bot availability",     group: "uptime"   },
-  { name: "throughput",           group: "moderate" },
-  { name: "order breaches",       group: "volatile" },
-  { name: "hours operational",    group: "stable"   },
-  { name: "pps uph",              group: "moderate" },
-  { name: "rack presented",       group: "stable"   },
-  { name: "# skus in the field",  group: "stable"   },
-  { name: "# units in the field", group: "stable"   },
-  { name: "untouched units",      group: "volatile" },
-  { name: "cubic utilization",    group: "stable"   },
-  { name: "totes",                group: "stable"   },
-  { name: "non-chemical racking", group: "stable"   },
-  { name: "chemical racking",     group: "stable"   },
-  { name: "ppf",                  group: "moderate" },
-  { name: "pps",                  group: "moderate" }
+  { name: "Bot Availability",     group: "uptime"   },
+  { name: "Throughput",           group: "moderate" },
+  { name: "Order Breaches",       group: "volatile" },
+  { name: "Hours Operational",    group: "stable"   },
+  { name: "PPS UPH",              group: "moderate" },
+  { name: "Rack Presented",       group: "stable"   },
+  { name: "# SKUs in the Field",  group: "stable"   },
+  { name: "# Units in the Field", group: "stable"   },
+  { name: "Untouched Units",      group: "volatile" },
+  { name: "Cubic Utilization",    group: "stable"   },
+  { name: "Totes",                group: "stable"   },
+  { name: "Non-Chemical Racking", group: "stable"   },
+  { name: "Chemical Racking",     group: "stable"   },
+  { name: "PPS",                  group: "moderate" }
 ];
 
 // Fallbacks used when a row's metric name matches no config entry.
-var TARGET_DEFAULT   = { direction: "higher", yellowPct: 0.20, decimals: 2 };
+var TARGET_DEFAULT         = { direction: "higher", yellowPct: 0.20, decimals: 2 };
 var RELATIVE_DEFAULT_GROUP = "moderate";
 
 var GROUP_THRESHOLDS = {
@@ -103,7 +99,6 @@ var GROUP_THRESHOLDS = {
 
 
 // ── Magnitude colour ramp (Relative Heatmap — GREEN ONLY) ────
-// Intensity reflects the SIZE of the week-over-week change.
 var GREEN_RAMP = [
   { r: 242, g: 242, b: 242 },  // 0 no change        #F2F2F2
   { r: 232, g: 245, b: 232 },  // 1 tiny change      #E8F5E8
@@ -123,8 +118,10 @@ var MAX_TIMES = 5;
 
 // ════════════════════════════════════════════════════════════
 //  CONFIG LOADING  (data-driven metric table)
-//  Reads the "⚙ Heat Map Config" sheet once per execution and
-//  caches it. Falls back to the built-in defaults if absent/empty.
+//  Reads the "⚙ Heat Map" sheet once per execution and caches it.
+//  Only rows whose Type is exactly Target/Relative are read, so
+//  blank rows and the guide section below are ignored. Falls back
+//  to built-in defaults if the sheet is absent / has no metrics.
 // ════════════════════════════════════════════════════════════
 
 var _CFG_CACHE = null;   // reset automatically on each script execution
@@ -132,7 +129,7 @@ var _CFG_CACHE = null;   // reset automatically on each script execution
 function getConfig_() {
   if (_CFG_CACHE) return _CFG_CACHE;
 
-  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET_NAME);
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SETUP_SHEET_NAME);
   var target = [], relative = [];
 
   if (sh) {
@@ -141,13 +138,13 @@ function getConfig_() {
       var rows = sh.getRange(CONFIG_DATA_ROW, 1, lastRow - CONFIG_DATA_ROW + 1, 6).getValues();
       rows.forEach(function(rw) {
         var name = collapseWs_(rw[0]);          // A: metric name (match text)
+        var type = collapseWs_(rw[1]);          // B: Type (must be exactly target/relative)
         if (!name) return;
-        var type = collapseWs_(rw[1]);          // B: Target / Relative
-        if (type.indexOf("relative") !== -1) {
+        if (type === "relative") {
           var grp = collapseWs_(rw[5]) || RELATIVE_DEFAULT_GROUP;  // F: group
           if (!GROUP_THRESHOLDS[grp]) grp = RELATIVE_DEFAULT_GROUP;
           relative.push({ name: name, group: grp });
-        } else {                                 // default: treat as Target
+        } else if (type === "target") {
           var dir = collapseWs_(rw[2]).indexOf("low") !== -1 ? "lower" : "higher";  // C
           var yb  = parseNum_(rw[3]);            // D: yellow band as a percent (e.g. 20)
           var dec = parseNum_(rw[4]);            // E: decimals
@@ -158,11 +155,12 @@ function getConfig_() {
             decimals:  (dec === null ? 2 : Math.max(0, Math.round(dec)))
           });
         }
+        // any other Type (blank, guide text, etc.) is ignored
       });
     }
   }
 
-  // No Config sheet, or it exists but holds no usable rows → defaults.
+  // No setup sheet, or it exists but holds no usable rows → defaults.
   if (target.length === 0 && relative.length === 0) {
     target   = DEFAULT_TARGET_METRICS.slice();
     relative = DEFAULT_RELATIVE_METRICS.slice();
@@ -303,10 +301,6 @@ function clearAllNotes() {
 
 // ════════════════════════════════════════════════════════════
 //  COLUMN RANGE
-//  Returns every column from DATA_START to the last column.
-//  Each row processor builds its OWN data-column list by checking
-//  which columns actually have numeric values in THAT row — which
-//  prevents cross-row contamination in the prior-week scan.
 // ════════════════════════════════════════════════════════════
 
 function getAllDataCols_(sheet) {
@@ -347,20 +341,19 @@ function processTargetRow_(sheet, row, allCols) {
   var target = parseNum_(sheet.getRange(row, TARGET_COL).getValue());
   if (target === null || target === 0) return;
 
-  // Metric config is looked up from the Config sheet (typo-tolerant).
-  // If the name matches nothing we still colour the row using a safe
-  // default so a small label change never blanks the whole row.
+  // Metric config is looked up from the setup sheet (typo-tolerant). If the
+  // name matches nothing we still colour the row with a safe default so a
+  // small label change never blanks the whole row.
   var metricNorm = collapseWs_(sheet.getRange(row, METRIC_COL).getValue());
   var cfg = resolveTargetCfg_(metricNorm);
   var usedFallback = false;
   if (!cfg) { cfg = TARGET_DEFAULT; usedFallback = true; }
 
   if (VALIDATE) {
-    // Flag (don't block) a fallback so you can spot an unrecognised name.
     if (usedFallback && metricNorm)
       sheet.getRange(row, METRIC_COL).setNote(
-        "⚠ Not found in “" + CONFIG_SHEET_NAME + "”. Coloured with the default " +
-        "(higher-is-better). Add this name to the Config sheet to control its direction/thresholds.");
+        "⚠ Not found in the “" + SETUP_SHEET_NAME + "” sheet. Coloured with the default " +
+        "(higher-is-better). Add this name there to control its direction / thresholds.");
     else
       sheet.getRange(row, METRIC_COL).clearNote();
   }
@@ -421,8 +414,6 @@ function processTargetRow_(sheet, row, allCols) {
     fcs[0][idx] = readableTextColor_(bgRgb.r, bgRgb.g, bgRgb.b);
   }
 
-  // Pre-clear guarantees stale colours are removed regardless of how
-  // null is interpreted by setBackgrounds; then apply in one shot.
   rowRange.setBackground(null);
   rowRange.setFontColor(null);
   rowRange.setBackgrounds(bgs);
@@ -433,17 +424,12 @@ function processTargetRow_(sheet, row, allCols) {
 
 // ════════════════════════════════════════════════════════════
 //  RELATIVE HEATMAP ROW  (batched, non-destructive, GREEN-ONLY)
-//
-//  Every cell is shaded with the GREEN ramp. The shade depth
-//  reflects the MAGNITUDE of the week-over-week change only — the
-//  direction (up or down) no longer affects the colour.
 // ════════════════════════════════════════════════════════════
 
 function processRelativeRow_(sheet, row, allCols) {
   if (!allCols || allCols.length === 0) return;
 
   // Metric label: rightmost non-empty text in cols B–D.
-  // IMPORTANT: never scan column E onward — that is the data region.
   var metricLabel = "";
   for (var mc = LABEL_COL_MAX; mc >= 2; mc--) {
     var v = cleanStr_(sheet.getRange(row, mc).getValue());
@@ -503,15 +489,14 @@ function processRelativeRow_(sheet, row, allCols) {
     var idx  = dcol - firstCol;
     var d    = colData[dcol];
 
-    // Prior week: scan left through dataColsThisRow ONLY, so we never
-    // compare against a value from a different row.
+    // Prior week: scan left through dataColsThisRow ONLY.
     var prevNorm = null;
     for (var pi = di - 1; pi >= 0; pi--) {
       var pd = colData[dataColsThisRow[pi]];
       if (pd && pd.num !== null) { prevNorm = pd.normNum; break; }
     }
 
-    var bgIndex   = 0;  // 0 = no change (neutral); higher = bigger change
+    var bgIndex   = 0;  // 0 = no change; higher = bigger change
     var hasChange = (prevNorm !== null && prevNorm !== 0 && d.normNum !== prevNorm);
 
     if (hasChange) {
@@ -519,13 +504,11 @@ function processRelativeRow_(sheet, row, allCols) {
       bgIndex = changeToBgIndex_(changePct, group);
     }
 
-    // GREEN-ONLY: the shade depth encodes how big the change was.
     var bgRgb = GREEN_RAMP[bgIndex];
     bgs[0][idx] = rgbToHex_(bgRgb.r, bgRgb.g, bgRgb.b);
     fcs[0][idx] = readableTextColor_(bgRgb.r, bgRgb.g, bgRgb.b);
   }
 
-  // Single batched write — values and number formats are left untouched
   rowRange.setBackground(null);
   rowRange.setFontColor(null);
   rowRange.setBackgrounds(bgs);
@@ -540,7 +523,8 @@ function processRelativeRow_(sheet, row, allCols) {
 
 function isSystemSheet_(sheet) {
   var n = sheet.getName();
-  return n === GUIDE_SHEET_NAME || n === CONFIG_SHEET_NAME;
+  if (n === SETUP_SHEET_NAME) return true;
+  return LEGACY_SHEETS.indexOf(n) !== -1;
 }
 
 function changeToBgIndex_(pct, group) {
@@ -597,13 +581,12 @@ function collapseWs_(raw) {
   return String(raw).replace(/[​‌‍﻿]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-// True when a non-numeric cell is actually a metric label / header that has
-// bled into the data column range, rather than corrupt data. Such cells are
-// left blank with NO validation note.
+// True when a non-numeric cell is actually a metric label / header bleeding
+// into the data range, rather than corrupt data. Left blank with NO note.
 function looksLikeLabel_(text, rowLabel) {
   if (!text) return false;
   var t = collapseWs_(text);
-  if (rowLabel && t === collapseWs_(rowLabel)) return true;   // matches this row's own label
+  if (rowLabel && t === collapseWs_(rowLabel)) return true;
   var cfg = getConfig_();
   for (var i = 0; i < cfg.relative.length; i++)
     if (cfg.relative[i].nameNorm && t.indexOf(cfg.relative[i].nameNorm) !== -1) return true;
@@ -614,208 +597,159 @@ function looksLikeLabel_(text, rowLabel) {
 
 
 // ════════════════════════════════════════════════════════════
-//  CONFIG SHEET  (the editable metric table)
+//  SETUP SHEET  (Config table on top + Guide below, in one sheet)
 // ════════════════════════════════════════════════════════════
 
-function createConfigSheet() {
+function createHeatMapSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var ex = ss.getSheetByName(CONFIG_SHEET_NAME);
+  var ex = ss.getSheetByName(SETUP_SHEET_NAME);
   if (ex) {
-    var resp = ui.alert(
-      "Config sheet already exists",
-      'Rebuilding "' + CONFIG_SHEET_NAME + '" RESETS it to defaults and ' +
-      'discards your edits. Continue?',
+    var resp = ui.alert("Rebuild the Heat Map sheet?",
+      'This RESETS "' + SETUP_SHEET_NAME + '" (your metric list AND the guide) back to ' +
+      'defaults and discards any edits. Continue?',
       ui.ButtonSet.YES_NO);
     if (resp !== ui.Button.YES) return;
     ss.deleteSheet(ex);
   }
-  var sh = ss.insertSheet(CONFIG_SHEET_NAME, 0);
+  var sh = ss.insertSheet(SETUP_SHEET_NAME, 0);
 
-  var OG = "#FF8400", NV = "#232359", LG = "#F5F5F5", WH = "#FFFFFF";
+  var OG = "#FF8400", NV = "#232359", LG = "#F5F5F5", WH = "#FFFFFF", FY = "#FFF7E6";
 
-  // Title + intro
-  sh.getRange(1,1,1,6).merge()
-    .setValue("⚙  Heat Map Config — edit metrics here (no code changes needed)")
-    .setBackground(OG).setFontColor(WH).setFontWeight("bold").setFontSize(13)
-    .setFontFamily("Arial").setVerticalAlignment("middle");
-  sh.setRowHeight(1, 34);
-
-  // Column headers (row 2 — data starts row 3 = CONFIG_DATA_ROW)
-  var headers = [
-    "Metric Name (partial match, not case-sensitive)",
-    "Type",
-    "Direction (Target only)",
-    "Yellow Band % (Target only)",
-    "Decimals (Target only)",
-    "Group (Relative only)"
-  ];
-  var hdr = sh.getRange(2,1,1,6);
-  hdr.setValues([headers])
-     .setBackground(NV).setFontColor(WH).setFontWeight("bold").setFontSize(9)
-     .setFontFamily("Arial").setVerticalAlignment("middle").setWrap(true);
-  sh.setRowHeight(2, 40);
-
-  // Build the data rows from current defaults
-  var data = [];
-  DEFAULT_TARGET_METRICS.forEach(function(m) {
-    data.push([m.name, "Target", m.direction, Math.round(m.yellowPct * 100), m.decimals, ""]);
-  });
-  DEFAULT_RELATIVE_METRICS.forEach(function(m) {
-    data.push([m.name, "Relative", "", "", "", m.group]);
-  });
-  sh.getRange(CONFIG_DATA_ROW, 1, data.length, 6).setValues(data)
-    .setFontFamily("Arial").setFontSize(9).setVerticalAlignment("middle");
-
-  // Zebra striping for readability
-  for (var i = 0; i < data.length; i++) {
-    if (i % 2 === 1)
-      sh.getRange(CONFIG_DATA_ROW + i, 1, 1, 6).setBackground(LG);
+  function rh(r,h){ sh.setRowHeight(r, h||22); }
+  function fullBar(r, text, bg, fg, sz) {
+    sh.getRange(r,1,1,8).merge().setValue(text)
+      .setBackground(bg).setFontColor(fg).setFontWeight("bold").setFontSize(sz||10)
+      .setFontFamily("Arial").setVerticalAlignment("middle").setWrap(true);
   }
-
-  // Dropdown validations over a generous range so new rows are guided too
-  var vEnd = CONFIG_DATA_ROW + Math.max(data.length, 0) + 200;
-  function dropdown(col, values) {
-    var rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(values, true).setAllowInvalid(true).build();
-    sh.getRange(CONFIG_DATA_ROW, col, vEnd - CONFIG_DATA_ROW + 1, 1).setDataValidation(rule);
+  function fullText(r, text, bg) {
+    sh.getRange(r,1,1,8).merge().setValue(text)
+      .setBackground(bg||WH).setFontColor(NV).setFontSize(9)
+      .setFontFamily("Arial").setVerticalAlignment("middle").setWrap(true);
   }
-  dropdown(2, ["Target", "Relative"]);
-  dropdown(3, ["higher", "lower"]);
-  dropdown(6, Object.keys(GROUP_THRESHOLDS));
-
-  // Footer help
-  var fr = CONFIG_DATA_ROW + data.length + 1;
-  sh.getRange(fr,1,1,6).merge()
-    .setValue("How to use:  • Add a row to add a metric (the Name is matched as a " +
-      "case-insensitive partial — extra spaces are ignored).  • Type = Target → coloured " +
-      "green/yellow/red vs the target in Col D of your data sheet; set Direction (higher = " +
-      "bigger is better, lower = smaller is better), Yellow Band % (how far past target is " +
-      "still yellow), and Decimals.  • Type = Relative → green-only by size of week-over-week " +
-      "change; set Group (stable / moderate / volatile / uptime).  • Delete a row to remove a " +
-      "metric.  Then run 🎨 Heat Map → Apply / Refresh Heat Map.")
-    .setBackground(LG).setFontColor(NV).setFontSize(9).setFontFamily("Arial")
-    .setWrap(true).setVerticalAlignment("top");
-  sh.setRowHeight(fr, 96);
-
-  sh.setColumnWidth(1, 320);
-  sh.setColumnWidth(2, 90);
-  sh.setColumnWidth(3, 150);
-  sh.setColumnWidth(4, 150);
-  sh.setColumnWidth(5, 130);
-  sh.setColumnWidth(6, 150);
-  sh.setFrozenRows(2);
-
-  ui.alert('✅ Config sheet created: "' + CONFIG_SHEET_NAME + '".\n\n' +
-    'Edit metrics there, then run 🎨 Heat Map → Apply / Refresh Heat Map.');
-}
-
-
-// ════════════════════════════════════════════════════════════
-//  HELPER SHEET  (rebuilt for v21)
-// ════════════════════════════════════════════════════════════
-
-function createHelperSheet() {
-  var ss   = SpreadsheetApp.getActiveSpreadsheet();
-  var name = GUIDE_SHEET_NAME;
-  var ex   = ss.getSheetByName(name);
-  if (ex) ss.deleteSheet(ex);
-  var sh = ss.insertSheet(name, 0);
-
-  var OG = "#FF8400", NV = "#232359", LG = "#F5F5F5", WH = "#FFFFFF";
-
-  function s(range, bg, fg, bold, sz, wrap) {
-    range.setBackground(bg||WH).setFontColor(fg||NV)
-         .setFontWeight(bold?"bold":"normal").setFontSize(sz||9)
-         .setFontFamily("Arial").setVerticalAlignment("middle");
-    if (wrap) range.setWrap(true);
-    return range;
+  function pair(r, a, b, bg) {
+    var x = bg || WH;
+    sh.getRange(r,1,1,2).merge().setValue(a)
+      .setBackground(x).setFontColor(NV).setFontWeight("bold").setFontSize(9)
+      .setFontFamily("Arial").setVerticalAlignment("middle").setWrap(true);
+    sh.getRange(r,3,1,6).merge().setValue(b)
+      .setBackground(x).setFontColor(NV).setFontSize(9)
+      .setFontFamily("Arial").setVerticalAlignment("middle").setWrap(true);
+    rh(r,28);
   }
-  function rh(r,h){ sh.setRowHeight(r,h||24); }
-  function sec(r,t){ s(sh.getRange(r,1,1,8).merge(),NV,WH,true,10).setValue(t); rh(r,26); }
-  function row2(r,a,b,bg){ var bg_=bg||WH; s(sh.getRange(r,1),bg_,NV,true).setValue(a); s(sh.getRange(r,2,1,7).merge(),bg_,NV,false,9,true).setValue(b); rh(r,30); }
-  function chdr(r,a,b){ s(sh.getRange(r,1),OG,WH,true).setValue(a); s(sh.getRange(r,2,1,7).merge(),OG,WH,true).setValue(b); rh(r,22); }
-  function swatch(r,bg,lbl){ sh.getRange(r,1).setBackground(bg).setValue(" "); s(sh.getRange(r,2,1,7).merge(),r%2===0?WH:LG,NV,false,9,true).setValue(lbl); rh(r,24); }
+  function swatch(r, hex, label, zebra) {
+    sh.getRange(r,1,1,2).merge().setBackground(hex);
+    sh.getRange(r,3,1,6).merge().setValue(label)
+      .setBackground(zebra?LG:WH).setFontColor(NV).setFontSize(9)
+      .setFontFamily("Arial").setVerticalAlignment("middle");
+    rh(r,22);
+  }
 
   var r = 1;
 
-  // Title
-  s(sh.getRange(r,1,1,8).merge(),OG,WH,true,14).setValue("⚙  Heat Map System Guide").setHorizontalAlignment("left"); rh(r,36); r++;
-  s(sh.getRange(r,1,1,8).merge(),NV,WH,false,9).setValue("How the script reads your sheet — v21 (metrics are now data-driven)"); rh(r,20); r++;
+  // ── Title ──
+  fullBar(r, "⚙  Heat Map — Metrics & Guide", OG, WH, 13); rh(r,34); r++;
 
-  // STEP 0 — Config sheet
-  rh(r,8); r++;
-  sec(r,"STEP 0 — METRICS LIVE IN THE CONFIG SHEET (not in code)"); r++;
-  s(sh.getRange(r,1,1,8).merge(),LG,NV,false,9,true).setValue('Run 🎨 Heat Map → Create / Refresh Config Sheet to build "' + CONFIG_SHEET_NAME + '". Add, rename or remove metrics there — the heat map reads it on the next run. To add a brand-new target metric tomorrow, just add a row (Name, Type = Target, Direction, Yellow Band %, Decimals). No code changes. If the Config sheet does not exist, built-in defaults are used.'); rh(r,56); r++;
-  chdr(r,"Config column","Meaning"); r++;
-  row2(r,"Metric Name","Matched against Col C (Target) or Col B/C/D (Relative). Case-insensitive, extra spaces ignored, partial match. Longest match wins."); r++;
-  row2(r,"Type","Target or Relative.",LG); r++;
-  row2(r,"Direction","Target only. higher = bigger is better; lower = smaller is better."); r++;
-  row2(r,"Yellow Band %","Target only. How far past the target still shows yellow before red (e.g. 20 = 20%).",LG); r++;
-  row2(r,"Decimals","Target only. Rounding used before comparing to the target."); r++;
-  row2(r,"Group","Relative only. stable / moderate / volatile / uptime — sets the change-size thresholds.",LG); r++;
+  // ── Config header (row 2 = CONFIG_DATA_ROW - 1) ──
+  sh.getRange(r,1,1,6).setValues([[
+    "Metric Name", "Type", "Direction", "Yellow Band %", "Decimals", "Group"
+  ]]).setBackground(NV).setFontColor(WH).setFontWeight("bold").setFontSize(9)
+     .setFontFamily("Arial").setVerticalAlignment("middle").setWrap(true);
+  rh(r,30); r++;   // now r === CONFIG_DATA_ROW (3)
 
-  // STEP 1
-  rh(r,8); r++;
-  sec(r,"STEP 1 — COLUMN DETECTION"); r++;
-  s(sh.getRange(r,1,1,8).merge(),LG,NV,false,9,true).setValue('Every column from Col E onward is scanned. For each row, only columns that contain an actual numeric value are coloured — empty and label columns are skipped automatically.'); rh(r,32); r++;
-  chdr(r,"Column","Result"); r++;
-  row2(r,"Col E onward, numeric value in this row","✓  Coloured — background applied"); r++;
-  row2(r,"Col E onward, empty / text value in this row","✗  Skipped (text values get a ⚠ note)",LG); r++;
+  // ── Default metric rows ──
+  var metricStart = r;
+  var data = [];
+  DEFAULT_TARGET_METRICS.forEach(function(m){
+    data.push([ m.name, "Target",
+                m.direction === "lower" ? "Lower is better" : "Higher is better",
+                Math.round(m.yellowPct * 100), m.decimals, "" ]);
+  });
+  DEFAULT_RELATIVE_METRICS.forEach(function(m){
+    data.push([ m.name, "Relative", "", "", "", m.group ]);
+  });
+  sh.getRange(metricStart, 1, data.length, 6).setValues(data)
+    .setFontFamily("Arial").setFontSize(9).setVerticalAlignment("middle");
+  for (var i = 0; i < data.length; i++) {
+    if (i % 2 === 1) sh.getRange(metricStart + i, 1, 1, 6).setBackground(LG);
+  }
+  r = metricStart + data.length;
 
-  // STEP 2
-  rh(r,8); r++;
-  sec(r,"STEP 2 — ROW DETECTION (Column A)"); r++;
-  chdr(r,"Column A","What happens"); r++;
-  row2(r,'"Target Heatmap"','Green / yellow / red vs the numeric target in Col D. Metric read from Col C and looked up in the Config sheet. If the name is not found, the row is still coloured with a safe default (higher-is-better) and the Col C cell gets a ⚠ note.'); r++;
-  row2(r,'"Relative Heatmap"','GREEN ONLY. Shade intensity = magnitude of the week-over-week change (bigger change = darker green). Direction up/down does not change the colour. Metric label read from Col B/C/D.',LG); r++;
-  row2(r,'(empty / other)','Row skipped entirely — safe for headers, blank rows, section titles.'); r++;
+  // ── Blank rows for the user to add their own metrics ──
+  var blankStart = r;
+  sh.getRange(blankStart, 1, BLANK_ROWS, 6).setBackground(FY);
+  for (var k = 0; k < BLANK_ROWS; k++) rh(blankStart + k, 22);
+  r = blankStart + BLANK_ROWS;
 
-  // Target scale
-  rh(r,8); r++;
-  sec(r,"TARGET HEATMAP — Colour Scale"); r++;
-  [["#C6EFCE","Target met or exceeded"],
-   ["#FFFFCC","Within the Yellow Band set in the Config sheet"],
-   ["#FFC7C7","Beyond the band — outside acceptable range"],
-   ["#8B0000","Extreme breach — far from target (white text)"]
-  ].forEach(function(t){ swatch(r,t[0],t[1]); r++; });
+  // ── Dropdowns over the metric rows + the blank rows ──
+  var ddEnd = r - 1;
+  function dropdown(col, values) {
+    var rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(values, true).setAllowInvalid(true).build();
+    sh.getRange(metricStart, col, ddEnd - metricStart + 1, 1).setDataValidation(rule);
+  }
+  dropdown(2, ["Target", "Relative"]);
+  dropdown(3, ["Higher is better", "Lower is better"]);
+  dropdown(6, ["stable", "moderate", "volatile", "uptime"]);
 
-  // Relative scale
-  rh(r,8); r++;
-  sec(r,"RELATIVE HEATMAP — Magnitude Colour Scale (GREEN ONLY)"); r++;
-  [["#F2F2F2","No change — neutral grey"],
-   ["#E8F5E8","Tiny week-over-week change"],
-   ["#C8E6C8","Small week-over-week change"],
-   ["#A8D4A8","Moderate week-over-week change"],
-   ["#7BB87B","Large week-over-week change (max shade)"]
-  ].forEach(function(t){ swatch(r,t[0],t[1]); r++; });
+  // ── Spacer, then the GUIDE ──
+  rh(r, 10); r++;
 
-  // Threshold groups
-  rh(r,8); r++;
-  sec(r,"RELATIVE GROUP CHANGE-SIZE THRESHOLDS"); r++;
-  chdr(r,"Group","Week-over-week change → shade"); r++;
-  [["Stable","Any change: light | >2%: mid | >4%: dark | >6%: darkest"],
-   ["Moderate","≥2%: light | ≥8%: mid | ≥15%: dark | ≥25%: darkest"],
-   ["Volatile","≥15%: light | ≥40%: mid | ≥100%: dark | ≥250%: darkest"],
-   ["Uptime","≥0.1%: light | ≥0.5%: mid | ≥1%: dark | ≥2%: darkest"]
-  ].forEach(function(g,i){ s(sh.getRange(r,1),i%2===0?WH:LG,NV,true).setValue(g[0]); s(sh.getRange(r,2,1,7).merge(),i%2===0?WH:LG,NV,false,9,true).setValue(g[1]); rh(r,28); r++; });
+  fullBar(r, "📘  GUIDE — how the heat map works", NV, WH, 11); rh(r,26); r++;
 
-  // Checklist
-  rh(r,8); r++;
-  sec(r,"QUICK SETUP CHECKLIST"); r++;
-  ['Run 🎨 Heat Map → Create / Refresh Config Sheet (once) and review the metric list',
-   'Col A: "Target Heatmap" for rows with a numeric target in Col D',
-   'Col A: "Relative Heatmap" for rows with no target',
-   'Col C: metric name for Target rows (must appear in the Config sheet)',
-   'Col D: numeric target value for Target rows',
-   'Add a new metric anytime by adding a row in the Config sheet — no code edits',
-   'Run: 🎨 Heat Map → Apply / Refresh Heat Map',
-   'A ⚠ note on a Col C metric cell means that name was not found in the Config sheet',
-   'Clear ⚠ notes anytime via 🎨 Heat Map → Clear All Validation Notes'
-  ].forEach(function(c,i){ s(sh.getRange(r,1,1,8).merge(),i%2===0?WH:LG,NV,false,9,true).setValue("☐  "+c); rh(r,24); r++; });
+  fullText(r, "① Edit the metric table at the top of this sheet (add a row in the shaded blank "
+    + "area to add a metric).   ② In each of your data sheets, put “Target Heatmap” or “Relative "
+    + "Heatmap” in Column A of every metric row.   ③ Run 🎨 Heat Map → Apply / Refresh Heat Map.", LG);
+  rh(r,46); r++;
 
-  sh.setColumnWidth(1,150); sh.setColumnWidth(2,420); sh.setFrozenRows(2);
-  SpreadsheetApp.getUi().alert('✅ Helper sheet created: "' + GUIDE_SHEET_NAME + '"');
+  fullBar(r, "WHAT GOES IN COLUMN A OF YOUR DATA SHEET", OG, WH, 10); rh(r,22); r++;
+  pair(r, "Target Heatmap", "Coloured against the target in Col D. Green = at/over target, yellow = "
+    + "just off, red = well off. Metric name is read from Col C.", WH); r++;
+  pair(r, "Relative Heatmap", "GREEN ONLY. Darker green = a bigger change from last week. Whether it "
+    + "went up or down does NOT change the colour.", LG); r++;
+  pair(r, "(blank / anything else)", "Row is ignored — safe for titles, totals and spacer rows.", WH); r++;
+
+  fullBar(r, "TARGET COLOURS", OG, WH, 10); rh(r,22); r++;
+  swatch(r, "#C6EFCE", "Met or beat the target", false); r++;
+  swatch(r, "#FFFFCC", "Just inside the Yellow Band you set", true); r++;
+  swatch(r, "#FFC7C7", "Outside the band — needs attention", false); r++;
+  swatch(r, "#8B0000", "Far from target (white text)", true); r++;
+
+  fullBar(r, "RELATIVE COLOURS (green only)", OG, WH, 10); rh(r,22); r++;
+  swatch(r, "#F2F2F2", "No change from last week", false); r++;
+  swatch(r, "#E8F5E8", "Tiny change", true); r++;
+  swatch(r, "#C8E6C8", "Small change", false); r++;
+  swatch(r, "#A8D4A8", "Moderate change", true); r++;
+  swatch(r, "#7BB87B", "Large change", false); r++;
+
+  fullBar(r, "THE “GROUP” COLUMN (relative metrics only)", OG, WH, 10); rh(r,22); r++;
+  fullText(r, "Group sets how big a weekly change must be before the green darkens. Pick how "
+    + "“jumpy” the metric normally is:", LG); rh(r,30); r++;
+  pair(r, "Stable", "Barely moves week to week (SKUs, Units, Cubic Util). Even a ~2% change shows up.", WH); r++;
+  pair(r, "Moderate", "Normal swings (Throughput, PPS). Needs roughly 8%+ to look big.", LG); r++;
+  pair(r, "Volatile", "Swings a lot (Order Breaches, Untouched Units). Needs ~40%+ to look big.", WH); r++;
+  pair(r, "Uptime", "Tiny moves matter (Bot Availability). Reacts at fractions of a percent.", LG); r++;
+
+  fullBar(r, "WRITING METRIC NAMES", OG, WH, 10); rh(r,22); r++;
+  fullText(r, "Type names the way they read in your sheet — e.g. PPF, OWT, R2R, UPH, BT/MI, "
+    + "System Uptime. Matching ignores CAPS and extra spaces and matches partial text, so the exact "
+    + "wording doesn’t need to be perfect. Direction: PPF / UPH / Uptime / BT/MI are “Higher is "
+    + "better”; OWT and R2R are “Lower is better”.", WH); rh(r,52); r++;
+
+  // ── Column widths & freeze ──
+  sh.setColumnWidth(1, 230);
+  sh.setColumnWidth(2, 95);
+  sh.setColumnWidth(3, 140);
+  sh.setColumnWidth(4, 120);
+  sh.setColumnWidth(5, 90);
+  sh.setColumnWidth(6, 110);
+  sh.setColumnWidth(7, 110);
+  sh.setColumnWidth(8, 110);
+  sh.setFrozenRows(2);
+
+  ui.alert('✅ Created "' + SETUP_SHEET_NAME + '".\n\n'
+    + 'Edit the metric table at the top (blank rows are highlighted), then run\n'
+    + '🎨 Heat Map → Apply / Refresh Heat Map.');
 }
 
 
@@ -826,11 +760,10 @@ function createHelperSheet() {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🎨 Heat Map")
-    .addItem("Apply to Selection",        "applyToSelection")
-    .addItem("Apply / Refresh Heat Map",  "applyHeatMap")
+    .addItem("Apply to Selection",       "applyToSelection")
+    .addItem("Apply / Refresh Heat Map", "applyHeatMap")
     .addSeparator()
-    .addItem("Create / Refresh Config Sheet", "createConfigSheet")
-    .addItem("Create / Refresh Helper Sheet", "createHelperSheet")
-    .addItem("Clear All Validation Notes", "clearAllNotes")
+    .addItem("Create / Refresh Heat Map Sheet", "createHeatMapSheet")
+    .addItem("Clear All Validation Notes",      "clearAllNotes")
     .addToUi();
 }
